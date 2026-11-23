@@ -1,0 +1,59 @@
+# Meeting agent worker image — same re-host-free chain as the other org images:
+# GitHub Actions -> hkccr -> cheap9 relay -> ccr. Nodes pull from ccr.
+name: image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+env:
+  REGISTRY: hkccr.ccs.tencentyun.com
+  NAMESPACE: fd-web
+  IMAGE_NAME: meeting-agent-worker
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.TCR_USER }}
+          password: ${{ secrets.TCR_PASS }}
+      - id: sha
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Build (load)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # A worker that cannot even load its native binding is a worker that fails
+      # the moment a meeting starts. Prove the module imports here.
+      - name: Sanity — the worker module loads (native binding present)
+        run: |
+          img="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.sha.outputs.tag }}"
+          docker run --rm --entrypoint node "$img" -e \
+            'import("@livekit/rtc-node").then(m=>{if(!m.Room)throw new Error("no Room");console.log("rtc-node loads")})'
+      - name: Push to hkccr
+        run: |
+          img="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}"
+          docker push "$img:${{ steps.sha.outputs.tag }}"
+          docker tag "$img:${{ steps.sha.outputs.tag }}" "$img:main"
+          docker push "$img:main"
+      - name: Report
+        run: |
+          img="${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}"
+          echo "pushed $img:${{ steps.sha.outputs.tag }} (+:main)" >> "$GITHUB_STEP_SUMMARY"
+          echo "relay lands on ccr <=5 min; verify FROM A CLUSTER NODE." >> "$GITHUB_STEP_SUMMARY"

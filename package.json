@@ -1,0 +1,12 @@
+{
+  "name": "meeting-agent-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LiveKit meeting agent: hears participants into the platform, speaks on request. Holds no model key.",
+  "scripts": { "start": "node src/worker.js" },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.0",
+    "livekit-server-sdk": "^2.13.0"
+  }
+}

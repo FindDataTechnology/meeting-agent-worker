@@ -1,0 +1,187 @@
+// ── Meeting agent worker (add-ai-native-meeting 2.1/2.2) ─────────────────────
+//
+// The media pump. It joins a LiveKit room as an agent participant, subscribes
+// to each human's audio track, segments it (~2s), and does exactly two things
+// through the PLATFORM's machine door — never with a key of its own:
+//
+//   hear:  POST {platform}/api/zhiyu/meetings/:id/utterance   (audio in → text in room)
+//   speak: POST {platform}/api/zhiyu/meetings/:id/speak        (text → audio track)
+//
+// Both calls carry `x-cloud-gateway-secret` + `x-actor-email`, the same machine
+// credential `capture-ingest` uses. The worker holds NO model key: the platform
+// does STT/TTS with its deployment credential, so a compromised worker cannot
+// spend money or reach a member's account.
+//
+// This file is deliberately small and dependency-light: it is the process, the
+// routing lives in gateway/zhiyu/meeting-agent.js and the routes.
+//
+// Env:
+//   MEETING_LIVEKIT_URL / _KEY / _SECRET   where to connect, how to authenticate
+//   MEETING_ROOM                            LiveKit room name (== platform meeting id mapping done by caller)
+//   PLATFORM_BASE                           e.g. http://127.0.0.1:3000
+//   GATEWAY_SECRET                          machine credential (== CELL_GATEWAY_SECRET)
+//   ACTOR_EMAIL                             the seat this worker speaks as
+import { AccessToken } from "livekit-server-sdk";
+import { Room, RoomEvent, AudioStream, TrackKind, AudioSource, LocalAudioTrack, TrackPublishOptions, AudioFrame } from "@livekit/rtc-node";
+import { timingSafeEqual } from "node:crypto";
+const secretMatches = (a, b) => {
+  if (typeof a !== "string" || !b) return false;
+  const x = Buffer.from(a), y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+};
+
+const env = process.env;
+const LK_URL = env.MEETING_LIVEKIT_URL;
+const LK_KEY = env.MEETING_LIVEKIT_KEY;
+const LK_SECRET = env.MEETING_LIVEKIT_SECRET;
+const ROOM = env.MEETING_ROOM;
+const MEETING_ID = env.MEETING_ID || ROOM;
+const PLATFORM = (env.PLATFORM_BASE || "http://127.0.0.1:3000").replace(/\/+$/, "");
+const GATEWAY_SECRET = env.GATEWAY_SECRET || "";
+const ACTOR_EMAIL = env.ACTOR_EMAIL || "";
+
+if (!LK_URL || !LK_KEY || !LK_SECRET || !ROOM) {
+  console.error("[meeting-worker] missing LiveKit config (MEETING_LIVEKIT_URL/_KEY/_SECRET, MEETING_ROOM)");
+  process.exit(2);
+}
+
+const SEGMENT_FRAMES = Number(env.MEETING_SEGMENT_FRAMES) || 100; // ~2s at 20ms/frame
+
+/** PCM frames → a WAV buffer (16-bit mono). */
+function wavFromPcm(frames, sampleRate, channels) {
+  const dataLen = frames.reduce((n, f) => n + f.length * 2, 0);
+  const buf = Buffer.alloc(44 + dataLen);
+  buf.write("RIFF", 0); buf.writeUInt32LE(36 + dataLen, 4); buf.write("WAVE", 8);
+  buf.write("fmt ", 12); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20);
+  buf.writeUInt16LE(channels, 22); buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * channels * 2, 28); buf.writeUInt16LE(channels * 2, 32);
+  buf.writeUInt16LE(16, 34); buf.write("data", 36); buf.writeUInt32LE(dataLen, 40);
+  let off = 44;
+  for (const f of frames) for (let i = 0; i < f.length; i++) { buf.writeInt16LE(f[i], off); off += 2; }
+  return buf;
+}
+
+const machineHeaders = () => {
+  const h = { "x-cloud-gateway-secret": GATEWAY_SECRET };
+  if (ACTOR_EMAIL) h["x-actor-email"] = ACTOR_EMAIL;
+  return h;
+};
+
+/** Hear: hand one participant's audio segment to the platform for STT. */
+async function ingestUtterance({ seatRef, wav }) {
+  // The platform route does STT + attribution + room delivery in one hop, so the
+  // worker never calls the model lane itself and never holds the key.
+  const form = new FormData();
+  form.append("audio", new Blob([wav], { type: "audio/wav" }), "segment.wav");
+  form.append("seatRef", seatRef);
+  try {
+    const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/utterance`, {
+      method: "POST",
+      headers: machineHeaders(),
+      body: form,
+    });
+    const j = await r.json().catch(() => ({}));
+    console.log(`[meeting-worker] utterance ${seatRef}: HTTP ${r.status} ${JSON.stringify(j).slice(0, 120)}`);
+    return j;
+  } catch (e) {
+    console.error("[meeting-worker] utterance failed:", e?.message || e);
+    return null;
+  }
+}
+
+/** Speak: platform synthesises text in the resolved voice; we return the WAV. */
+export async function synthesizeForMeeting({ text, seatRef }) {
+  const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/speak`, {
+    method: "POST",
+    headers: { ...machineHeaders(), "content-type": "application/json" },
+    body: JSON.stringify({ text, seatRef }),
+  });
+  if (!r.ok) return null;
+  return Buffer.from(await r.arrayBuffer()); // WAV
+}
+
+/** Push a WAV buffer (16k mono) onto a published audio track. */
+async function speakIntoRoom(room, wav) {
+  const pcm = new Int16Array((wav.length - 44) / 2);
+  for (let i = 0; i < pcm.length; i++) pcm[i] = wav.readInt16LE(44 + i * 2);
+  const src = new AudioSource(16000, 1);
+  const trk = LocalAudioTrack.createAudioTrack("agent-speech", src);
+  await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
+  const f = new Int16Array(320);
+  for (let n = 0; n + 320 <= pcm.length; n += 320) {
+    for (let i = 0; i < 320; i++) f[i] = pcm[n + i];
+    await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
+  }
+}
+
+async function main() {
+  const at = new AccessToken(LK_KEY, LK_SECRET, { identity: `agent:${ACTOR_EMAIL || "meeting"}`, name: "会中助手", ttl: "6h" });
+  at.addGrant({ roomJoin: true, room: ROOM, canPublish: true, canSubscribe: true, agent: true });
+  const room = new Room();
+
+  room.on(RoomEvent.TrackSubscribed, async (track, pub, part) => {
+    if (pub.kind !== TrackKind.KIND_AUDIO) return;
+    console.log(`[meeting-worker] subscribed audio from ${part.identity}`);
+    const reader = new AudioStream(track).getReader();
+    const frames = [];
+    let rate = 48000, ch = 1;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        frames.push(value.data); rate = value.sampleRate; ch = value.channels;
+        if (frames.length >= SEGMENT_FRAMES) {
+          const wav = wavFromPcm(frames.splice(0, frames.length), rate, ch);
+          // seatRef = the participant identity (worker joins with identity == seat ref).
+          await ingestUtterance({ seatRef: part.identity, wav });
+        }
+      }
+    } catch (e) {
+      console.log("[meeting-worker] stream ended", part.identity, e?.message);
+    }
+  });
+
+  await room.connect(LK_URL, await at.toJwt());
+  console.log(`[meeting-worker] joined ${ROOM} as agent; listening`);
+
+  // ── control door: speak on request ─────────────────────────────────────────
+  // The platform asks the worker to say something (the seat was addressed).
+  // A tiny HTTP face, bound to loopback by default, guarded by the SAME machine
+  // secret the worker uses outbound — so only the platform can make the agent
+  // talk, and the worker still holds no model key (it forwards the text to the
+  // platform's speak route, which does the TTS).
+  let speakQueue = Promise.resolve();
+  const CONTROL_PORT = Number(env.WORKER_CONTROL_PORT) || 0;
+  const CONTROL_HOST = env.WORKER_CONTROL_HOST || "127.0.0.1";
+  if (CONTROL_PORT > 0) {
+    const http = await import("node:http");
+    const srv = http.createServer(async (req, res) => {
+      if (req.method !== "POST" || req.url !== "/speak") { res.writeHead(404); return res.end(); }
+      if (!secretMatches(req.headers["x-cloud-gateway-secret"], GATEWAY_SECRET)) { res.writeHead(401); return res.end(); }
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", async () => {
+        try {
+          const { text, seatRef } = JSON.parse(body || "{}");
+          const wav = await synthesizeForMeeting({ text: String(text || ""), seatRef: String(seatRef || ACTOR_EMAIL) });
+          if (!wav) { res.writeHead(502); return res.end(JSON.stringify({ error: "synthesis failed" })); }
+          // One speak at a time: two concurrent pushes onto the same track would
+          // interleave into gibberish, so serialize.
+          await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav)));
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, bytes: wav.length }));
+        } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e?.message || e) })); }
+      });
+    });
+    srv.listen(CONTROL_PORT, CONTROL_HOST, () => console.log(`[meeting-worker] control on ${CONTROL_HOST}:${CONTROL_PORT}`));
+  }
+  const shutdown = async () => { try { await room.disconnect(); } catch {} process.exit(0); };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((e) => { console.error("[meeting-worker] fatal:", e); process.exit(1); });
+}
+
+export { wavFromPcm, speakIntoRoom, ingestUtterance };
