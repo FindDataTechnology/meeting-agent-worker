@@ -118,29 +118,35 @@ async function speakIntoRoom(room, wav, signal = null) {
     await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
   } catch (e) {
     // Publishing can fail when the previous track is still being torn down.
-    // Left unguarded it escapes as a 500 whose message ("This operation was
-    // aborted") has nothing to do with this speech — the one failure mode that
+    // Left unguarded it escaped as a 500 whose message ("This operation was
+    // aborted") had nothing to do with this speech — the one failure mode that
     // made every fix before this one look like it had not worked.
     console.log(`[meeting-worker] publishTrack failed (${e?.name || "?"}: ${e?.message || e}); treating as no-speech`);
     return false;
   }
-  const f = new Int16Array(320);
-  for (let n = 0; n + 320 <= pcm.length; n += 320) {
-    if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
-    for (let i = 0; i < 320; i++) f[i] = pcm[n + i];
-    try {
-      await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
-    } catch (e) {
-      // A barge-in can land while a frame is mid-flight: the track is torn down
-      // under us and captureFrame throws instead of returning. That IS the
-      // interruption, not a failure — report it as one (2026-11-24, measured:
-      // the control port answered 500 "This operation was aborted" on a
-      // successful barge-in, which reads as a defect in any log or client).
+  try {
+    const f = new Int16Array(320);
+    for (let n = 0; n + 320 <= pcm.length; n += 320) {
       if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
-      throw e;
+      for (let i = 0; i < 320; i++) f[i] = pcm[n + i];
+      await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
     }
+    return true;
+  } catch (e) {
+    // A barge-in can land while a frame is mid-flight: the track is torn down
+    // under us and captureFrame throws instead of returning. That IS the
+    // interruption, not a failure.
+    if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
+    console.log(`[meeting-worker] captureFrame failed (${e?.name || "?"}: ${e?.message || e})`);
+    return false;
+  } finally {
+    // UNPUBLISH when the sentence ends (2026-11-24). Without this every speech
+    // published ANOTHER "agent-speech" track and never released it; after a few
+    // sentences the participant hits its track limit and publishTrack starts
+    // throwing AbortError — which surfaced as "the second speech always fails".
+    // The room had three dead agent tracks by the third sentence.
+    try { await room.localParticipant.unpublishTrack(trk, true); } catch { /* already gone */ }
   }
-  return true;
 }
 
 /** Fetch the meeting's next agent utterances to speak (add-ai-native-meeting 2.3). */

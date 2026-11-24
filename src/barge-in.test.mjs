@@ -72,3 +72,13 @@ test("one failed speech must not poison the queue for the next one", () => {
   // And the chain assignment must carry that catch, not bypass it.
   assert.match(SRC, /speakQueue = speakQueue\s*\n?\s*\.catch\(\(\) => \{\}\)/, "the caught queue must be what gets stored back");
 });
+
+test("every speech releases its track, or the participant runs out of them", () => {
+  // Each speech published a NEW "agent-speech" track and never unpublished it.
+  // After a few sentences publishTrack started throwing AbortError, which is
+  // what "the second speech always 500s" actually was (2026-11-24: the room
+  // held three dead agent tracks by the third sentence).
+  const fn = SRC.slice(SRC.indexOf("async function speakIntoRoom"), SRC.indexOf("/** Fetch the meeting's next"));
+  assert.match(fn, /unpublishTrack\(/, "speakIntoRoom must release its track");
+  assert.match(fn, /finally \{[\s\S]*unpublishTrack/, "the release must be in a finally — an interrupted sentence leaves a track too");
+});
