@@ -104,3 +104,12 @@ test("each sentence publishes under a unique track name", () => {
   const fn = SRC.slice(SRC.indexOf("async function speakIntoRoom"), SRC.indexOf("/** Fetch the meeting's next"));
   assert.match(fn, /createAudioTrack\(`agent-speech-\$\{/, "the track name must be unique per sentence");
 });
+
+test("the control response distinguishes 'played' from 'byte count'", () => {
+  // `bytes` is the WAV length, so a failed publish still looked successful.
+  // `played` is the only field that means the audio reached the room.
+  const handler = SRC.slice(SRC.indexOf('req.url !== "/speak"'), SRC.indexOf("srv.listen(CONTROL_PORT"));
+  assert.match(handler, /let played = false;/, "played must start false");
+  assert.match(handler, /played = await/, "played comes from speakIntoRoom's return");
+  assert.match(handler, /\{ ok: true, bytes: wav\.length, played, interrupted \}/, "the response carries all three");
+});

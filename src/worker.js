@@ -260,6 +260,7 @@ async function main() {
           // One speak at a time: two concurrent pushes onto the same track would
           // interleave into gibberish, so serialize.
           let interrupted = false;
+          let played = false;
           try {
             // `.catch(() => {})` on the QUEUE, not just on this call: the queue
             // is a long-lived chain, so one rejected link poisons every later
@@ -267,7 +268,7 @@ async function main() {
             // error. That is exactly the shape of the 2026-11-24 defect: a
             // barge-in on speech #1 made speech #2 answer 500 "This operation
             // was aborted" even though nothing was aborting it.
-            await (speakQueue = speakQueue
+            played = await (speakQueue = speakQueue
               .catch(() => {})
               .then(() => speakIntoRoom(room, wav, ctrl.signal)));
             interrupted = ctrl.signal.aborted;
@@ -284,8 +285,12 @@ async function main() {
           // speech and a human took the floor. Reporting the difference is what
           // lets a tester (or the platform) tell "it stopped because someone
           // spoke" from "it broke".
+          //
+          // `played` is separate from `bytes` on purpose: bytes is the WAV's
+          // length, so a publish that failed still reported a big number and
+          // looked like success. Only `played` means the audio reached the room.
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ ok: true, bytes: wav.length, interrupted }));
+          res.end(JSON.stringify({ ok: true, bytes: wav.length, played, interrupted }));
         } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e?.message || e) })); }
       });
     });
