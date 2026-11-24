@@ -230,12 +230,23 @@ async function main() {
           speakingAbort = ctrl;
           // One speak at a time: two concurrent pushes onto the same track would
           // interleave into gibberish, so serialize.
-          await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav, ctrl.signal)));
+          let interrupted = false;
+          try {
+            await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav, ctrl.signal)));
+            interrupted = ctrl.signal.aborted;
+          } finally {
+            // Clear the shared controller when THIS speech ends. Leaving a spent
+            // (or aborted) controller in `speakingAbort` made the next speech
+            // inherit it: measured 2026-11-24, a second /speak answered 500
+            // "This operation was aborted" without any human talking, because
+            // the previous run's controller was still installed and already
+            // tripped by the barge-in that ended it.
+            if (speakingAbort === ctrl) speakingAbort = null;
+          }
           // A barge-in is a SUCCESSFUL outcome, not a 500: the caller asked for
           // speech and a human took the floor. Reporting the difference is what
           // lets a tester (or the platform) tell "it stopped because someone
           // spoke" from "it broke".
-          const interrupted = ctrl.signal.aborted;
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, bytes: wav.length, interrupted }));
         } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e?.message || e) })); }
@@ -269,7 +280,13 @@ async function main() {
           }
           const ctrl = new AbortController();
           speakingAbort = ctrl;
-          saying = saying.then(() => speakIntoRoom(room, wav, ctrl.signal)).catch(() => {});
+          // Clear the controller when this item ends, for the same reason the
+          // control port does: a spent or tripped controller left in
+          // `speakingAbort` makes the NEXT speech inherit it and abort instantly.
+          saying = saying
+            .then(() => speakIntoRoom(room, wav, ctrl.signal))
+            .catch(() => {})
+            .finally(() => { if (speakingAbort === ctrl) speakingAbort = null; });
           console.log(`[meeting-worker] saying seq ${item.seq}: ${item.text.slice(0, 40)}`);
           next = item.seq;
         }
