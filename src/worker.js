@@ -226,19 +226,29 @@ async function main() {
   let saying = Promise.resolve();
   if (MEETING_ID) {
     const POLL_MS = Number(env.MEETING_SAY_POLL_MS) || 2000;
+    console.log(`[meeting-worker] speak loop started, cursor=${cursor}, poll=${POLL_MS}ms`);
     const timer = setInterval(async () => {
       try {
         const j = await toSay(cursor);
         if (!j) return;
-        cursor = Number(j.cursor) || cursor;
+        // Advance the cursor only PAST what we actually spoke. A synthesis that
+        // fails (the 词元 lane 503s intermittently) must NOT consume the cursor,
+        // or that answer is lost with no record. Items are contiguous from the
+        // server, so on the first failure we stop and retry from there next poll.
+        let next = cursor;
         for (const item of j.items || []) {
           const wav = await synthesizeForMeeting({ text: item.text, seatRef: ACTOR_EMAIL });
-          if (!wav) continue;
+          if (!wav) {
+            console.log(`[meeting-worker] synthesis failed at seq ${item.seq}; holding cursor at ${next} for retry`);
+            break;
+          }
           const ctrl = new AbortController();
           speakingAbort = ctrl;
           saying = saying.then(() => speakIntoRoom(room, wav, ctrl.signal)).catch(() => {});
           console.log(`[meeting-worker] saying seq ${item.seq}: ${item.text.slice(0, 40)}`);
+          next = item.seq;
         }
+        cursor = next;
       } catch (e) { console.log("[meeting-worker] to-say poll failed:", e?.message || e); }
     }, POLL_MS);
     timer.unref?.();
