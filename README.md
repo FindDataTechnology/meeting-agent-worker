@@ -39,3 +39,15 @@ GHA → hkccr → cheap9 relay → ccr; nodes pull from ccr. Verify from a node:
 ```
 k3s ctr -n k8s.io images pull ccr.ccs.tencentyun.com/fd-web/meeting-agent-worker:<tag>
 ```
+
+## Known limits (first cut)
+
+- **No VAD yet**: every ~2 s of a person's track is sent to STT, silence
+  included. That is honest but wasteful; a VAD gate (silero) belongs here next,
+  and it is also what makes interruption (2.3) possible.
+- **No LLM**: the worker transcribes and speaks on request; it does not yet
+  decide *whether* to answer. The platform's room router decides that; the
+  control door is how an answer gets spoken.
+- **Segments, not turns**: a long sentence across a 2 s boundary is two STT
+  calls. Fine for presence, not for exact transcripts — the LLM/VAD round fixes
+  it.

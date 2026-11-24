@@ -22,6 +22,7 @@
 //   GATEWAY_SECRET                          machine credential (== CELL_GATEWAY_SECRET)
 //   ACTOR_EMAIL                             the seat this worker speaks as
 import { AccessToken } from "livekit-server-sdk";
+import { createEnergyVad } from "./vad-energy.mjs";
 import { Room, RoomEvent, AudioStream, TrackKind, AudioSource, LocalAudioTrack, TrackPublishOptions, AudioFrame } from "@livekit/rtc-node";
 import { timingSafeEqual } from "node:crypto";
 const secretMatches = (a, b) => {
@@ -45,7 +46,6 @@ if (!LK_URL || !LK_KEY || !LK_SECRET || !ROOM) {
   process.exit(2);
 }
 
-const SEGMENT_FRAMES = Number(env.MEETING_SEGMENT_FRAMES) || 100; // ~2s at 20ms/frame
 
 /** PCM frames → a WAV buffer (16-bit mono). */
 function wavFromPcm(frames, sampleRate, channels) {
@@ -123,15 +123,26 @@ async function main() {
     if (pub.kind !== TrackKind.KIND_AUDIO) return;
     console.log(`[meeting-worker] subscribed audio from ${part.identity}`);
     const reader = new AudioStream(track).getReader();
-    const frames = [];
+    // Cut on SILENCE, not on a fixed clock. The fixed 2 s cut split one sentence
+    // into "里的一段真实。" + "齿发言。" in production (2026-11-24); an energy VAD
+    // keeps a whole utterance together and drops pure silence instead of
+    // transcribing it.
+    const vad = createEnergyVad({
+      silenceMs: Number(env.MEETING_VAD_SILENCE_MS) || 700,
+      minSpeechMs: Number(env.MEETING_VAD_MIN_SPEECH_MS) || 300,
+      maxSegmentMs: Number(env.MEETING_VAD_MAX_MS) || 15000,
+      rmsThreshold: Number(env.MEETING_VAD_RMS) || 500,
+    });
     let rate = 48000, ch = 1;
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        frames.push(value.data); rate = value.sampleRate; ch = value.channels;
-        if (frames.length >= SEGMENT_FRAMES) {
-          const wav = wavFromPcm(frames.splice(0, frames.length), rate, ch);
+        rate = value.sampleRate; ch = value.channels;
+        const cut = vad.push(value.data, rate);
+        if (cut) {
+          if (!cut.hadSpeech) continue; // silence-only stretch: nothing to transcribe
+          const wav = wavFromPcm(cut.segment, rate, ch);
           // seatRef = the participant identity (worker joins with identity == seat ref).
           await ingestUtterance({ seatRef: part.identity, wav });
         }
