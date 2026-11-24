@@ -104,7 +104,12 @@ export async function synthesizeForMeeting({ text, seatRef }) {
 }
 
 /** Push a WAV buffer (16k mono) onto a published audio track. */
-async function speakIntoRoom(room, wav) {
+// Barge-in (add-ai-native-meeting 2.3): a person talking stops the agent mid
+// sentence. An AbortSignal is the whole mechanism — the speak loop checks it per
+// frame. "Yield the turn to the human" is not compliance, it is this one flag.
+let speakingAbort = null;
+
+async function speakIntoRoom(room, wav, signal = null) {
   const pcm = new Int16Array((wav.length - 44) / 2);
   for (let i = 0; i < pcm.length; i++) pcm[i] = wav.readInt16LE(44 + i * 2);
   const src = new AudioSource(16000, 1);
@@ -112,6 +117,7 @@ async function speakIntoRoom(room, wav) {
   await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
   const f = new Int16Array(320);
   for (let n = 0; n + 320 <= pcm.length; n += 320) {
+    if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); break; }
     for (let i = 0; i < 320; i++) f[i] = pcm[n + i];
     await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
   }
@@ -162,6 +168,8 @@ async function main() {
         if (done) break;
         rate = value.sampleRate; ch = value.channels;
         const cut = vad.push(value.data, rate);
+        // A person is talking: stop the agent's current sentence (barge-in).
+        if (speakingAbort && !speakingAbort.aborted) speakingAbort.abort();
         if (cut) {
           if (!cut.hadSpeech) continue; // silence-only stretch: nothing to transcribe
           const wav = wavFromPcm(cut.segment, rate, ch);
@@ -226,7 +234,9 @@ async function main() {
         for (const item of j.items || []) {
           const wav = await synthesizeForMeeting({ text: item.text, seatRef: ACTOR_EMAIL });
           if (!wav) continue;
-          saying = saying.then(() => speakIntoRoom(room, wav)).catch(() => {});
+          const ctrl = new AbortController();
+          speakingAbort = ctrl;
+          saying = saying.then(() => speakIntoRoom(room, wav, ctrl.signal)).catch(() => {});
           console.log(`[meeting-worker] saying seq ${item.seq}: ${item.text.slice(0, 40)}`);
         }
       } catch (e) { console.log("[meeting-worker] to-say poll failed:", e?.message || e); }
