@@ -94,3 +94,13 @@ test("unpublishTrack receives the publication SID, not the track object", () => 
   assert.match(fn, /unpublishTrack\(pub\?\.sid|unpublishTrack\(pub\.sid/, "unpublish must use the SID");
   assert.doesNotMatch(fn, /unpublishTrack\(trk/, "the track object is not a SID and silently no-ops");
 });
+
+test("each sentence publishes under a unique track name", () => {
+  // Reusing "agent-speech" made the next publish collide with the previous
+  // unpublish still settling, which the SDK reports as AbortError. Measured
+  // 2026-11-24: R1/R2 fine, R3/R4 both publishTrack-failed while STILL
+  // answering 200 with a byte count — the control port looked healthy while
+  // nothing was sent. A unique name removes the collision entirely.
+  const fn = SRC.slice(SRC.indexOf("async function speakIntoRoom"), SRC.indexOf("/** Fetch the meeting's next"));
+  assert.match(fn, /createAudioTrack\(`agent-speech-\$\{/, "the track name must be unique per sentence");
+});

@@ -113,7 +113,13 @@ async function speakIntoRoom(room, wav, signal = null) {
   const pcm = new Int16Array((wav.length - 44) / 2);
   for (let i = 0; i < pcm.length; i++) pcm[i] = wav.readInt16LE(44 + i * 2);
   const src = new AudioSource(16000, 1);
-  const trk = LocalAudioTrack.createAudioTrack("agent-speech", src);
+  // A UNIQUE track name per sentence. Reusing "agent-speech" made the next
+  // publish collide with the previous unpublish still settling, which the SDK
+  // reports as AbortError — the same symptom as the track leak, arriving by a
+  // different route (measured 2026-11-24: R1 and R2 fine, R3 and R4 both
+  // publishTrack-failed while still answering 200 with a byte count, so the
+  // control port looked healthy while nothing was being sent).
+  const trk = LocalAudioTrack.createAudioTrack(`agent-speech-${Date.now()}`, src);
   let pub = null;
   try {
     pub = await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
@@ -150,8 +156,7 @@ async function speakIntoRoom(room, wav, signal = null) {
     // (participant.d.ts). Passing the track published nothing here — the tracks
     // stayed, publishTrack kept failing, and every round answered
     // `200 {interrupted:false}` while no audio was actually sent.
-    if (pub?.sid) { try { await room.localParticipant.unpublishTrack(pub.sid, true); } catch { /* already gone */ } }
-  }
+    if (pub?.sid) { try { await room.localParticipant.unpublishTrack(pub.sid, true); } catch { /* already gone */ } }  }
 }
 
 /** Fetch the meeting's next agent utterances to speak (add-ai-native-meeting 2.3). */
