@@ -61,3 +61,14 @@ test("VAD still cuts on silence and never on a silence-only stretch", () => {
   for (let i = 0; i < 25 && !cut; i++) cut = vad.push(quiet(), RATE);
   assert.ok(cut && cut.reason === "silence" && cut.hadSpeech, "silence after speech cuts with hadSpeech");
 });
+
+test("one failed speech must not poison the queue for the next one", () => {
+  // `speakQueue` is a long-lived promise chain shared by every speech. A single
+  // rejected link makes every LATER `.then()` skip its body and rethrow the old
+  // error — so a barge-in on speech #1 made speech #2 answer 500 with nothing
+  // aborting it (measured 2026-11-24). The queue must be healed at the join.
+  const joins = SRC.match(/speakQueue\s*\.catch\(\(\) => \{\}\)/g) || [];
+  assert.ok(joins.length >= 1, "the speak queue must absorb a previous rejection before chaining");
+  // And the chain assignment must carry that catch, not bypass it.
+  assert.match(SRC, /speakQueue = speakQueue\s*\n?\s*\.catch\(\(\) => \{\}\)/, "the caught queue must be what gets stored back");
+});

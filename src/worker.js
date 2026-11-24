@@ -236,7 +236,15 @@ async function main() {
           // interleave into gibberish, so serialize.
           let interrupted = false;
           try {
-            await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav, ctrl.signal)));
+            // `.catch(() => {})` on the QUEUE, not just on this call: the queue
+            // is a long-lived chain, so one rejected link poisons every later
+            // speech — the next /speak would skip its body and rethrow the old
+            // error. That is exactly the shape of the 2026-11-24 defect: a
+            // barge-in on speech #1 made speech #2 answer 500 "This operation
+            // was aborted" even though nothing was aborting it.
+            await (speakQueue = speakQueue
+              .catch(() => {})
+              .then(() => speakIntoRoom(room, wav, ctrl.signal)));
             interrupted = ctrl.signal.aborted;
           } finally {
             // Clear the shared controller when THIS speech ends. Leaving a spent
