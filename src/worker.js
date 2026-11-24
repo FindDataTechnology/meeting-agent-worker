@@ -114,8 +114,9 @@ async function speakIntoRoom(room, wav, signal = null) {
   for (let i = 0; i < pcm.length; i++) pcm[i] = wav.readInt16LE(44 + i * 2);
   const src = new AudioSource(16000, 1);
   const trk = LocalAudioTrack.createAudioTrack("agent-speech", src);
+  let pub = null;
   try {
-    await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
+    pub = await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
   } catch (e) {
     // Publishing can fail when the previous track is still being torn down.
     // Left unguarded it escaped as a 500 whose message ("This operation was
@@ -142,10 +143,14 @@ async function speakIntoRoom(room, wav, signal = null) {
   } finally {
     // UNPUBLISH when the sentence ends (2026-11-24). Without this every speech
     // published ANOTHER "agent-speech" track and never released it; after a few
-    // sentences the participant hits its track limit and publishTrack starts
-    // throwing AbortError — which surfaced as "the second speech always fails".
-    // The room had three dead agent tracks by the third sentence.
-    try { await room.localParticipant.unpublishTrack(trk, true); } catch { /* already gone */ }
+    // sentences publishTrack started throwing AbortError — which surfaced as
+    // "the second speech always fails".
+    //
+    // `unpublishTrack` takes the publication SID, not the track object
+    // (participant.d.ts). Passing the track published nothing here — the tracks
+    // stayed, publishTrack kept failing, and every round answered
+    // `200 {interrupted:false}` while no audio was actually sent.
+    if (pub?.sid) { try { await room.localParticipant.unpublishTrack(pub.sid, true); } catch { /* already gone */ } }
   }
 }
 

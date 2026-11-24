@@ -82,3 +82,15 @@ test("every speech releases its track, or the participant runs out of them", () 
   assert.match(fn, /unpublishTrack\(/, "speakIntoRoom must release its track");
   assert.match(fn, /finally \{[\s\S]*unpublishTrack/, "the release must be in a finally — an interrupted sentence leaves a track too");
 });
+
+test("unpublishTrack receives the publication SID, not the track object", () => {
+  // The SDK signature is `unpublishTrack(trackSid: string, stopOnUnpublish?)`
+  // (participant.d.ts). Passing the LocalAudioTrack object silently did
+  // nothing: tracks piled up, publishTrack started throwing AbortError, and
+  // every round answered 200 {interrupted:false} while no audio was sent at
+  // all — the most convincing wrong result of this whole hunt (2026-11-24).
+  const fn = SRC.slice(SRC.indexOf("async function speakIntoRoom"), SRC.indexOf("/** Fetch the meeting's next"));
+  assert.match(fn, /publishTrack\(trk[^)]*\)/, "the publication handle must be captured");
+  assert.match(fn, /unpublishTrack\(pub\?\.sid|unpublishTrack\(pub\.sid/, "unpublish must use the SID");
+  assert.doesNotMatch(fn, /unpublishTrack\(trk/, "the track object is not a SID and silently no-ops");
+});
