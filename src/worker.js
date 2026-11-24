@@ -35,14 +35,17 @@ const env = process.env;
 const LK_URL = env.MEETING_LIVEKIT_URL;
 const LK_KEY = env.MEETING_LIVEKIT_KEY;
 const LK_SECRET = env.MEETING_LIVEKIT_SECRET;
-const ROOM = env.MEETING_ROOM;
-const MEETING_ID = env.MEETING_ID || ROOM;
+// MEETING_ID is the only identity the worker is given; the LiveKit room name
+// comes from the platform (the meeting row), not from an env var. MEETING_ROOM
+// stays as an explicit override for a one-off / test run.
+const MEETING_ID = env.MEETING_ID || "";
+const ROOM_OVERRIDE = env.MEETING_ROOM || "";
 const PLATFORM = (env.PLATFORM_BASE || "http://127.0.0.1:3000").replace(/\/+$/, "");
 const GATEWAY_SECRET = env.GATEWAY_SECRET || "";
 const ACTOR_EMAIL = env.ACTOR_EMAIL || "";
 
-if (!LK_URL || !LK_KEY || !LK_SECRET || !ROOM) {
-  console.error("[meeting-worker] missing LiveKit config (MEETING_LIVEKIT_URL/_KEY/_SECRET, MEETING_ROOM)");
+if (!LK_URL || !LK_KEY || !LK_SECRET || (!MEETING_ID && !ROOM_OVERRIDE)) {
+  console.error("[meeting-worker] need MEETING_LIVEKIT_URL/_KEY/_SECRET and either MEETING_ID (resolved via platform) or MEETING_ROOM (override)");
   process.exit(2);
 }
 
@@ -114,7 +117,19 @@ async function speakIntoRoom(room, wav) {
   }
 }
 
+/** Ask the platform which media room this meeting is. */
+async function resolveRoom() {
+  if (ROOM_OVERRIDE) return ROOM_OVERRIDE;
+  const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/media`, { headers: machineHeaders() });
+  if (!r.ok) throw new Error(`meeting media lookup failed: HTTP ${r.status} ${(await r.text()).slice(0, 120)}`);
+  const j = await r.json();
+  if (!j.livekitRoom) throw new Error("meeting has no media room");
+  return j.livekitRoom;
+}
+
 async function main() {
+  const ROOM = await resolveRoom();
+  console.log(`[meeting-worker] meeting ${MEETING_ID || "(override)"} → media room ${ROOM}`);
   const at = new AccessToken(LK_KEY, LK_SECRET, { identity: `agent:${ACTOR_EMAIL || "meeting"}`, name: "会中助手", ttl: "6h" });
   at.addGrant({ roomJoin: true, room: ROOM, canPublish: true, canSubscribe: true, agent: true });
   const room = new Room();

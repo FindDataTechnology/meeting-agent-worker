@@ -26,7 +26,8 @@ the way the browser lane ships chromium separately.
 | var | meaning |
 |---|---|
 | `MEETING_LIVEKIT_URL` / `_KEY` / `_SECRET` | where to connect, how to auth |
-| `MEETING_ROOM` / `MEETING_ID` | LiveKit room and the platform meeting id |
+| `MEETING_ID` | the platform meeting id — the worker asks the platform which LiveKit room it is (add-ai-native-meeting 3.1) |
+| `MEETING_ROOM` | optional override; when set, skips the platform lookup (one-off runs) |
 | `PLATFORM_BASE` | e.g. `http://platform.fd-prod:3000` |
 | `GATEWAY_SECRET` | machine credential (== the platform's `CELL_GATEWAY_SECRET`) |
 | `ACTOR_EMAIL` | the seat this worker speaks as |
