@@ -194,6 +194,26 @@ async function main() {
   at.addGrant({ roomJoin: true, room: ROOM, canPublish: true, canSubscribe: true, agent: true });
   const room = new Room();
 
+  // The worker must know when it has been dropped (2026-11-24). Without this it
+  // kept running its to-say loop against a room it was no longer in: every
+  // publish threw AbortError, the control port answered 200 with played:false,
+  // and the only visible symptom was "the agent stopped talking" — while every
+  // liveness signal said the process was healthy.
+  //
+  // Two different endings, and conflating them is what makes a pod crashloop:
+  //   · the ROOM is gone (everyone left; LiveKit closes it) — the meeting is
+  //     over, exit 0, and the supervisor must not restart it for this meeting
+  //   · anything else (identity taken, signal dropped, server shutdown) — we
+  //     were evicted; exit non-zero so the pod rejoins
+  room.on(RoomEvent.Disconnected, (reason) => {
+    const code = String(reason ?? "UNKNOWN");
+    const roomGone = /ROOM_DELETED|CLIENT_INITIATED/.test(code);
+    console.log(`[meeting-worker] DISCONNECTED from ${ROOM} (${code}); ${roomGone ? "room is over, exiting 0" : "evicted, exiting 1 to rejoin"}`);
+    process.exit(roomGone ? 0 : 1);
+  });
+  room.on(RoomEvent.Reconnecting, () => console.log("[meeting-worker] reconnecting…"));
+  room.on(RoomEvent.Reconnected, () => console.log("[meeting-worker] reconnected"));
+
   room.on(RoomEvent.TrackSubscribed, async (track, pub, part) => {
     if (pub.kind !== TrackKind.KIND_AUDIO) return;
     console.log(`[meeting-worker] subscribed audio from ${part.identity}`);

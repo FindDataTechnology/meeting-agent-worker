@@ -124,3 +124,16 @@ test("a publish that loses the race with participant churn is retried on a fresh
   assert.match(fn, /trk = LocalAudioTrack\.createAudioTrack\(`agent-speech-\$\{Date\.now\(\)\}-\$\{attempt\}`,/, "each retry gets a fresh track");
   assert.match(fn, /publishTrack gave up/, "giving up must be visible, not silent");
 });
+
+test("being dropped from the room is a detectable death, not silence", () => {
+  // Measured 2026-11-24: the room emptied, the worker kept its to-say loop
+  // running, every publish threw AbortError, and the control port answered
+  // `200 {played:false}`. Nothing said "I am not in the room any more".
+  assert.match(SRC, /RoomEvent\.Disconnected/, "the worker must observe its own disconnection");
+  // And the two endings must not be conflated: a finished room is exit 0, an
+  // eviction is exit 1 — treating both the same makes a finished meeting look
+  // like a crashlooping pod forever.
+  const handler = SRC.slice(SRC.indexOf("RoomEvent.Disconnected"), SRC.indexOf("await room.connect"));
+  assert.match(handler, /ROOM_DELETED/, "a finished room is recognised");
+  assert.match(handler, /process\.exit\(roomGone \? 0 : 1\)/, "finished ≠ evicted");
+});
