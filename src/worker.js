@@ -117,10 +117,21 @@ async function speakIntoRoom(room, wav, signal = null) {
   await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
   const f = new Int16Array(320);
   for (let n = 0; n + 320 <= pcm.length; n += 320) {
-    if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); break; }
+    if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
     for (let i = 0; i < 320; i++) f[i] = pcm[n + i];
-    await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
+    try {
+      await src.captureFrame(new AudioFrame(f, 16000, 1, 320));
+    } catch (e) {
+      // A barge-in can land while a frame is mid-flight: the track is torn down
+      // under us and captureFrame throws instead of returning. That IS the
+      // interruption, not a failure — report it as one (2026-11-24, measured:
+      // the control port answered 500 "This operation was aborted" on a
+      // successful barge-in, which reads as a defect in any log or client).
+      if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
+      throw e;
+    }
   }
+  return true;
 }
 
 /** Fetch the meeting's next agent utterances to speak (add-ai-native-meeting 2.3). */
@@ -220,8 +231,13 @@ async function main() {
           // One speak at a time: two concurrent pushes onto the same track would
           // interleave into gibberish, so serialize.
           await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav, ctrl.signal)));
+          // A barge-in is a SUCCESSFUL outcome, not a 500: the caller asked for
+          // speech and a human took the floor. Reporting the difference is what
+          // lets a tester (or the platform) tell "it stopped because someone
+          // spoke" from "it broke".
+          const interrupted = ctrl.signal.aborted;
           res.writeHead(200, { "content-type": "application/json" });
-          res.end(JSON.stringify({ ok: true, bytes: wav.length }));
+          res.end(JSON.stringify({ ok: true, bytes: wav.length, interrupted }));
         } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e?.message || e) })); }
       });
     });
