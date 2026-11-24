@@ -103,6 +103,43 @@ export async function synthesizeForMeeting({ text, seatRef }) {
   return Buffer.from(await r.arrayBuffer()); // WAV
 }
 
+/**
+ * Upload one recorded audio segment (add-ai-native-meeting 4.2).
+ *
+ * The worker sends BYTES ONLY — it holds no storage credential. The platform
+ * signs the S3 write and stores the object; this process never learns the bucket
+ * or the key back. That is the same split as STT/TTS: the process closest to the
+ * media is the one with the least authority.
+ *
+ * Returns true only when the platform confirms a write. A false must be treated
+ * as data loss by the caller (retry, then say so), never as "move on".
+ */
+export async function uploadRecordingSegment({ seatRef, wav, seq, durationMs }) {
+  const form = new FormData();
+  form.append("audio", new Blob([wav], { type: "audio/wav" }), "segment.wav");
+  form.append("seatRef", seatRef);
+  form.append("seq", String(seq));
+  form.append("durationMs", String(durationMs || 0));
+  try {
+    const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/recording`, {
+      method: "POST",
+      headers: machineHeaders(),
+      body: form,
+    });
+    if (!r.ok) {
+      // 409 recording_disabled is expected on deployments without the feature —
+      // log once at the caller, not per segment.
+      const j = await r.json().catch(() => ({}));
+      console.log(`[meeting-worker] recording segment ${seq} rejected: HTTP ${r.status} ${j.code || ""}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`[meeting-worker] recording segment ${seq} failed:`, e?.message || e);
+    return false;
+  }
+}
+
 /** Push a WAV buffer (16k mono) onto a published audio track. */
 // Barge-in (add-ai-native-meeting 2.3): a person talking stops the agent mid
 // sentence. An AbortSignal is the whole mechanism — the speak loop checks it per
@@ -255,11 +292,40 @@ async function main() {
       rmsThreshold: Number(env.MEETING_VAD_RMS) || 500,
     });
     let rate = 48000, ch = 1;
+    // Recording accumulator (add-ai-native-meeting 4.2). Independent of the VAD
+    // on purpose: the VAD cuts SENTENCES for transcription, recording needs
+    // contiguous coverage of what the person actually said. One scene per
+    // minute keeps each file immediately playable and memory flat.
+    const RECORD_MS = Number(env.MEETING_RECORD_SEGMENT_MS) || 60000;
+    let recFrames = [];
+    let recMs = 0;
+    let recSeq = 0;
+    let recDropped = 0;   // segments the platform refused — reported at the end
+    const flushRecording = async () => {
+      if (!recFrames.length) return;
+      const frames = recFrames;
+      const ms = recMs;
+      recFrames = [];
+      recMs = 0;
+      // A segment that is pure silence is not worth an object (and would make
+      // the segment list look like people spoke when they did not).
+      let loudest = 0;
+      for (const f of frames) for (let i = 0; i < f.length; i++) { const v = Math.abs(f[i]); if (v > loudest) loudest = v; }
+      if (loudest < (Number(env.MEETING_RECORD_RMS) || 200)) return;
+      const wav = wavFromPcm(frames, rate, ch);
+      const ok = await uploadRecordingSegment({ seatRef: part.identity, wav, seq: recSeq++, durationMs: Math.round(ms) });
+      if (!ok) recDropped += 1;
+    };
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         rate = value.sampleRate; ch = value.channels;
+        // Recording first: it must see every frame, including the ones the VAD
+        // folds into a single segment.
+        recFrames.push(value.data);
+        recMs += (value.data.length / rate) * 1000;
+        if (recMs >= RECORD_MS) await flushRecording();
         const cut = vad.push(value.data, rate);
         // A person is TALKING: stop the agent's current sentence (barge-in).
         // Gated on the frame actually containing speech — the unconditional
@@ -276,6 +342,17 @@ async function main() {
       }
     } catch (e) {
       console.log("[meeting-worker] stream ended", part.identity, e?.message);
+    }
+    // Flush the tail: the last partial minute is real audio and would otherwise
+    // be lost on every meeting that did not happen to end on a boundary.
+    try { await flushRecording(); } catch (e) { console.log("[meeting-worker] final recording flush failed:", e?.message || e); }
+    if (recDropped > 0) {
+      // Loud on purpose: an unwritten segment is lost audio. The platform got
+      // the bytes and failed to store them; silence here would be the same
+      // class of defect as a gate that never runs.
+      console.error(`[meeting-worker] ${recDropped} recording segment(s) were NOT stored for ${part.identity}`);
+    } else if (recSeq > 0) {
+      console.log(`[meeting-worker] recorded ${recSeq} segment(s) for ${part.identity}`);
     }
   });
 
