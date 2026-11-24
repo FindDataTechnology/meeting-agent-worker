@@ -208,9 +208,18 @@ async function main() {
           const { text, seatRef } = JSON.parse(body || "{}");
           const wav = await synthesizeForMeeting({ text: String(text || ""), seatRef: String(seatRef || ACTOR_EMAIL) });
           if (!wav) { res.writeHead(502); return res.end(JSON.stringify({ error: "synthesis failed" })); }
+          // Barge-in must work here too (2026-11-24). This endpoint used to call
+          // speakIntoRoom without a signal, so a human talking could stop the
+          // to-say loop's speech but NOT speech pushed through the control port —
+          // the same feature behaving differently on its two entry paths. The
+          // controller is shared with the loop on purpose: one speakingAbort, so
+          // a human stops whatever is currently being said regardless of which
+          // path started it.
+          const ctrl = new AbortController();
+          speakingAbort = ctrl;
           // One speak at a time: two concurrent pushes onto the same track would
           // interleave into gibberish, so serialize.
-          await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav)));
+          await (speakQueue = speakQueue.then(() => speakIntoRoom(room, wav, ctrl.signal)));
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({ ok: true, bytes: wav.length }));
         } catch (e) { res.writeHead(500); res.end(JSON.stringify({ error: String(e?.message || e) })); }
