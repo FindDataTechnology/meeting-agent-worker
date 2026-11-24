@@ -41,14 +41,16 @@ GHA → hkccr → cheap9 relay → ccr; nodes pull from ccr. Verify from a node:
 k3s ctr -n k8s.io images pull ccr.ccs.tencentyun.com/fd-web/meeting-agent-worker:<tag>
 ```
 
-## Known limits (first cut)
+## Known limits
 
-- **No VAD yet**: every ~2 s of a person's track is sent to STT, silence
-  included. That is honest but wasteful; a VAD gate (silero) belongs here next,
-  and it is also what makes interruption (2.3) possible.
+- **Energy VAD, not a neural one**: segments are cut on silence (RMS threshold),
+  which keeps a whole utterance together and drops pure silence. A neural VAD
+  (silero) would handle noisy rooms / soft speech better — worth revisiting, but
+  it costs a runtime (onnxruntime is 300 MB+) that this worker is built to avoid.
+  Interruption (openspec 2.3) still needs the LLM turn loop, not VAD alone.
 - **No LLM**: the worker transcribes and speaks on request; it does not yet
   decide *whether* to answer. The platform's room router decides that; the
   control door is how an answer gets spoken.
-- **Segments, not turns**: a long sentence across a 2 s boundary is two STT
-  calls. Fine for presence, not for exact transcripts — the LLM/VAD round fixes
-  it.
+- **Segments, not turns**: each VAD-ended stretch is one STT call. Fine for
+  presence and clean short utterances; very long monologues are force-cut at
+  15 s.
