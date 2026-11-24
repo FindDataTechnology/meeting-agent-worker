@@ -113,3 +113,14 @@ test("the control response distinguishes 'played' from 'byte count'", () => {
   assert.match(handler, /played = await/, "played comes from speakIntoRoom's return");
   assert.match(handler, /\{ ok: true, bytes: wav\.length, played, interrupted \}/, "the response carries all three");
 });
+
+test("a publish that loses the race with participant churn is retried on a fresh track", () => {
+  // A human joining or leaving resets the peer connection; the publish in
+  // flight throws AbortError. Measured 2026-11-24: the sentence right after a
+  // barge-in publisher left failed exactly once, every time. A track whose
+  // publish aborted is left half-registered, so the retry must build a NEW one.
+  const fn = SRC.slice(SRC.indexOf("async function speakIntoRoom"), SRC.indexOf("/** Fetch the meeting's next"));
+  assert.match(fn, /for \(let attempt = 1; attempt <= 3/, "publishing must be retried");
+  assert.match(fn, /trk = LocalAudioTrack\.createAudioTrack\(`agent-speech-\$\{Date\.now\(\)\}-\$\{attempt\}`,/, "each retry gets a fresh track");
+  assert.match(fn, /publishTrack gave up/, "giving up must be visible, not silent");
+});

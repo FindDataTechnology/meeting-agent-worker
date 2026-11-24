@@ -119,16 +119,27 @@ async function speakIntoRoom(room, wav, signal = null) {
   // different route (measured 2026-11-24: R1 and R2 fine, R3 and R4 both
   // publishTrack-failed while still answering 200 with a byte count, so the
   // control port looked healthy while nothing was being sent).
-  const trk = LocalAudioTrack.createAudioTrack(`agent-speech-${Date.now()}`, src);
+  let trk = LocalAudioTrack.createAudioTrack(`agent-speech-${Date.now()}`, src);
   let pub = null;
-  try {
-    pub = await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
-  } catch (e) {
-    // Publishing can fail when the previous track is still being torn down.
-    // Left unguarded it escaped as a 500 whose message ("This operation was
-    // aborted") had nothing to do with this speech — the one failure mode that
-    // made every fix before this one look like it had not worked.
-    console.log(`[meeting-worker] publishTrack failed (${e?.name || "?"}: ${e?.message || e}); treating as no-speech`);
+  // Publishing races participant churn: a human joining or leaving resets the
+  // peer connection under us and the publish throws AbortError. Measured
+  // 2026-11-24: the sentence right after a barge-in publisher left failed
+  // exactly once, every time. A fresh track per attempt, because a track whose
+  // publish aborted is left half-registered and retrying the same object fails
+  // the same way.
+  for (let attempt = 1; attempt <= 3 && !pub; attempt++) {
+    try {
+      pub = await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
+    } catch (e) {
+      console.log(`[meeting-worker] publishTrack attempt ${attempt} failed (${e?.name || "?"}: ${e?.message || e})`);
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+        trk = LocalAudioTrack.createAudioTrack(`agent-speech-${Date.now()}-${attempt}`, src);
+      }
+    }
+  }
+  if (!pub) {
+    console.log("[meeting-worker] publishTrack gave up; nothing was sent");
     return false;
   }
   try {
