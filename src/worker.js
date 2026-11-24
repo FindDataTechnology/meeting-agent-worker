@@ -179,8 +179,12 @@ async function main() {
         if (done) break;
         rate = value.sampleRate; ch = value.channels;
         const cut = vad.push(value.data, rate);
-        // A person is talking: stop the agent's current sentence (barge-in).
-        if (speakingAbort && !speakingAbort.aborted) speakingAbort.abort();
+        // A person is TALKING: stop the agent's current sentence (barge-in).
+        // Gated on the frame actually containing speech — the unconditional
+        // version aborted on silence too, which meant the echo frames still
+        // draining from a publisher that had already left would kill the NEXT
+        // speech the instant it started (measured 2026-11-24).
+        if (vad.speech && speakingAbort && !speakingAbort.aborted) speakingAbort.abort();
         if (cut) {
           if (!cut.hadSpeech) continue; // silence-only stretch: nothing to transcribe
           const wav = wavFromPcm(cut.segment, rate, ch);

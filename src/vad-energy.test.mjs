@@ -55,3 +55,25 @@ test("threshold makes amplitude matter: very quiet frames never count as speech"
   assert.ok(cut);
   assert.equal(cut.hadSpeech, false, "amplitude below threshold is not speech");
 });
+
+test("speech flags the frame, so barge-in fires on voice and not on silence", () => {
+  // The barge-in decision is per-FRAME: "did this frame contain a human voice".
+  // Aborting on every frame (including silence) killed the next speech the
+  // instant it began — measured 2026-11-24, a second /speak answered 500
+  // "This operation was aborted" with nobody talking.
+  const vad = createEnergyVad({ silenceMs: 400, minSpeechMs: 100, maxSegmentMs: 15000, rmsThreshold: 500 });
+  vad.push(loud(), RATE);
+  assert.equal(vad.speech, true, "a loud frame is speech");
+  vad.push(quiet(), RATE);
+  assert.equal(vad.speech, false, "a silent frame is not speech");
+  vad.push(loud(50), RATE); // below the threshold
+  assert.equal(vad.speech, false, "amplitude under the threshold is not speech");
+});
+
+test("speech is not carried over: a silent frame after a loud one reads false", () => {
+  const vad = createEnergyVad({ silenceMs: 400, minSpeechMs: 100, maxSegmentMs: 15000, rmsThreshold: 500 });
+  for (let i = 0; i < 5; i++) vad.push(loud(), RATE);
+  assert.equal(vad.speech, true);
+  for (let i = 0; i < 5; i++) vad.push(quiet(), RATE);
+  assert.equal(vad.speech, false, "a stale true would keep aborting the agent forever");
+});
