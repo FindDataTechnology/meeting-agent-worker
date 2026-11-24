@@ -130,10 +130,14 @@ test("being dropped from the room is a detectable death, not silence", () => {
   // running, every publish threw AbortError, and the control port answered
   // `200 {played:false}`. Nothing said "I am not in the room any more".
   assert.match(SRC, /RoomEvent\.Disconnected/, "the worker must observe its own disconnection");
-  // And the two endings must not be conflated: a finished room is exit 0, an
-  // eviction is exit 1 — treating both the same makes a finished meeting look
-  // like a crashlooping pod forever.
   const handler = SRC.slice(SRC.indexOf("RoomEvent.Disconnected"), SRC.indexOf("await room.connect"));
-  assert.match(handler, /ROOM_DELETED/, "a finished room is recognised");
-  assert.match(handler, /process\.exit\(roomGone \? 0 : 1\)/, "finished ≠ evicted");
+  // `reason` is a NUMERIC enum. The first version matched /ROOM_DELETED/ against
+  // it — false for every value, including the one it meant (ROOM_CLOSED = 10) —
+  // so a finished meeting was treated as an eviction and the pod crash-looped.
+  assert.doesNotMatch(handler, /\/ROOM_(DELETED|CLOSED)\//, "reason is a number, not a name");
+  // A closed room is not the same question as a finished meeting: everyone
+  // stepping out also closes it. Only the platform can tell them apart.
+  assert.match(handler, /askMeetingOpen\(\)/, "the worker must ask whether the meeting is over");
+  assert.match(handler, /process\.exit\(0\)/, "a finished meeting exits 0");
+  assert.match(handler, /process\.exit\(1\)/, "a still-open meeting exits 1 to rejoin");
 });

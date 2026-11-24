@@ -177,9 +177,21 @@ async function toSay(afterSeq) {
   return r.json();
 }
 
+/**
+ * Is this meeting still open? Asked when the media room closes under us: a
+ * closed LiveKit room means everyone left, which happens both at the end of a
+ * meeting and when people step out for a moment. Only the platform knows which.
+ * Returns false on a definite "ended", true on anything unclear (rejoining is
+ * the safer answer — a live meeting with no agent is worse than a spare pod).
+ */
+async function askMeetingOpen() {
+  const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/media`, { headers: machineHeaders() });
+  if (r.status === 409) return false; // meeting ended / not open — the documented answer
+  return true;
+}
+
 /** Ask the platform which media room this meeting is. */
-async function resolveRoom() {
-  if (ROOM_OVERRIDE) return ROOM_OVERRIDE;
+async function resolveRoom() {  if (ROOM_OVERRIDE) return ROOM_OVERRIDE;
   const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/media`, { headers: machineHeaders() });
   if (!r.ok) throw new Error(`meeting media lookup failed: HTTP ${r.status} ${(await r.text()).slice(0, 120)}`);
   const j = await r.json();
@@ -200,16 +212,30 @@ async function main() {
   // and the only visible symptom was "the agent stopped talking" — while every
   // liveness signal said the process was healthy.
   //
-  // Two different endings, and conflating them is what makes a pod crashloop:
-  //   · the ROOM is gone (everyone left; LiveKit closes it) — the meeting is
-  //     over, exit 0, and the supervisor must not restart it for this meeting
-  //   · anything else (identity taken, signal dropped, server shutdown) — we
-  //     were evicted; exit non-zero so the pod rejoins
+  // `reason` is a NUMERIC enum (DisconnectReason), not a name. The first version
+  // of this handler matched /ROOM_DELETED/ against it, which was false for every
+  // value including the one it meant (ROOM_CLOSED = 10) — so a finished room was
+  // treated as an eviction and the pod crash-looped after every meeting.
   room.on(RoomEvent.Disconnected, (reason) => {
-    const code = String(reason ?? "UNKNOWN");
-    const roomGone = /ROOM_DELETED|CLIENT_INITIATED/.test(code);
-    console.log(`[meeting-worker] DISCONNECTED from ${ROOM} (${code}); ${roomGone ? "room is over, exiting 0" : "evicted, exiting 1 to rejoin"}`);
-    process.exit(roomGone ? 0 : 1);
+    const ROOM_CLOSED = 10;   // all Standard/Ingress participants left
+    const CLIENT_INITIATED = 1;
+    const endedByUs = reason === CLIENT_INITIATED;
+    // A closed room is NOT necessarily a finished meeting: it also happens when
+    // everyone steps out for a moment. Ask the platform which it is — exiting 0
+    // on a live meeting would leave it without an agent until the next event.
+    askMeetingOpen()
+      .then((open) => {
+        if (!open) {
+          console.log(`[meeting-worker] disconnected (reason ${reason}); meeting is over, exiting 0`);
+          process.exit(0);
+        }
+        console.log(`[meeting-worker] disconnected (reason ${reason}); meeting still open, exiting 1 to rejoin`);
+        process.exit(1);
+      })
+      .catch(() => {
+        console.log(`[meeting-worker] disconnected (reason ${reason}); could not reach the platform, exiting 1`);
+        process.exit(1);
+      });
   });
   room.on(RoomEvent.Reconnecting, () => console.log("[meeting-worker] reconnecting…"));
   room.on(RoomEvent.Reconnected, () => console.log("[meeting-worker] reconnected"));
