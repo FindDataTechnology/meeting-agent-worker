@@ -117,6 +117,13 @@ async function speakIntoRoom(room, wav) {
   }
 }
 
+/** Fetch the meeting's next agent utterances to speak (add-ai-native-meeting 2.3). */
+async function toSay(afterSeq) {
+  const r = await fetch(`${PLATFORM}/api/zhiyu/meetings/${encodeURIComponent(MEETING_ID)}/to-say?after=${afterSeq}`, { headers: machineHeaders() });
+  if (!r.ok) return null;
+  return r.json();
+}
+
 /** Ask the platform which media room this meeting is. */
 async function resolveRoom() {
   if (ROOM_OVERRIDE) return ROOM_OVERRIDE;
@@ -178,6 +185,8 @@ async function main() {
   // platform's speak route, which does the TTS).
   let speakQueue = Promise.resolve();
   const CONTROL_PORT = Number(env.WORKER_CONTROL_PORT) || 0;
+  // Default loopback for a one-off test; in-cluster the deployment sets 0.0.0.0
+  // so the platform can push "now speak this" (add-ai-native-meeting 2.3).
   const CONTROL_HOST = env.WORKER_CONTROL_HOST || "127.0.0.1";
   if (CONTROL_PORT > 0) {
     const http = await import("node:http");
@@ -201,6 +210,30 @@ async function main() {
     });
     srv.listen(CONTROL_PORT, CONTROL_HOST, () => console.log(`[meeting-worker] control on ${CONTROL_HOST}:${CONTROL_PORT}`));
   }
+  // ── speak loop (2.3): poll for the room's agent replies and say them ──────
+  // The agent decides whether/what to answer in the ROOM (its own a2a turn); the
+  // worker only voices what the room already decided. Cursor-based so a missed
+  // poll is recovered on the next one; speaking is serialized on one track.
+  let cursor = Number(env.MEETING_SAY_CURSOR || 0) || 0;
+  let saying = Promise.resolve();
+  if (MEETING_ID) {
+    const POLL_MS = Number(env.MEETING_SAY_POLL_MS) || 2000;
+    const timer = setInterval(async () => {
+      try {
+        const j = await toSay(cursor);
+        if (!j) return;
+        cursor = Number(j.cursor) || cursor;
+        for (const item of j.items || []) {
+          const wav = await synthesizeForMeeting({ text: item.text, seatRef: ACTOR_EMAIL });
+          if (!wav) continue;
+          saying = saying.then(() => speakIntoRoom(room, wav)).catch(() => {});
+          console.log(`[meeting-worker] saying seq ${item.seq}: ${item.text.slice(0, 40)}`);
+        }
+      } catch (e) { console.log("[meeting-worker] to-say poll failed:", e?.message || e); }
+    }, POLL_MS);
+    timer.unref?.();
+  }
+
   const shutdown = async () => { try { await room.disconnect(); } catch {} process.exit(0); };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
