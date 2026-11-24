@@ -114,7 +114,16 @@ async function speakIntoRoom(room, wav, signal = null) {
   for (let i = 0; i < pcm.length; i++) pcm[i] = wav.readInt16LE(44 + i * 2);
   const src = new AudioSource(16000, 1);
   const trk = LocalAudioTrack.createAudioTrack("agent-speech", src);
-  await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
+  try {
+    await room.localParticipant.publishTrack(trk, new TrackPublishOptions());
+  } catch (e) {
+    // Publishing can fail when the previous track is still being torn down.
+    // Left unguarded it escapes as a 500 whose message ("This operation was
+    // aborted") has nothing to do with this speech — the one failure mode that
+    // made every fix before this one look like it had not worked.
+    console.log(`[meeting-worker] publishTrack failed (${e?.name || "?"}: ${e?.message || e}); treating as no-speech`);
+    return false;
+  }
   const f = new Int16Array(320);
   for (let n = 0; n + 320 <= pcm.length; n += 320) {
     if (signal?.aborted) { console.log("[meeting-worker] speech interrupted by a human"); return false; }
